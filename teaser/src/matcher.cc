@@ -6,10 +6,10 @@
  * See LICENSE for the license information
  */
 
-
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 #include <flann/flann.hpp>
+#include <thread>
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -150,21 +150,67 @@ void Matcher::advancedMatching(bool use_crosscheck, bool use_tuple_test, float t
   ///////////////////////////
   /// INITIAL MATCHING
   ///////////////////////////
-  std::vector<int> i_to_j(nPti, -1);
-  for (int j = 0; j < nPtj; j++) {
-    searchKDTree(&feature_tree_i, features_[fj][j], corres_K, dis, 1);
-    int i = corres_K[0];
-    if (i_to_j[i] == -1) {
-      searchKDTree(&feature_tree_j, features_[fi][i], corres_K, dis, 1);
-      int ij = corres_K[0];
-      i_to_j[i] = ij;
-    }
-    corres_ji.push_back(std::pair<int, int>(i, j));
+  // std::vector<int> i_to_j(nPti, -1);
+  // for (int j = 0; j < nPtj; j++) {
+  //   searchKDTree(&feature_tree_i, features_[fj][j], corres_K, dis, 1);
+  //   int i = corres_K[0];
+  //   if (i_to_j[i] == -1) {
+  //     searchKDTree(&feature_tree_j, features_[fi][i], corres_K, dis, 1);
+  //     int ij = corres_K[0];
+  //     i_to_j[i] = ij;
+  //   }
+  //   corres_ji.push_back(std::pair<int, int>(i, j));
+  // }
+
+  // for (int i = 0; i < nPti; i++) {
+  //   if (i_to_j[i] != -1)
+  //     corres_ij.push_back(std::pair<int, int>(i, i_to_j[i]));
+  // }
+
+  // 多线程计算corres_ji
+  const int threadNum = std::thread::hardware_concurrency();
+  int perCalSize = nPtj / threadNum + 1;
+  std::vector<std::thread> threads;
+  std::vector<int> j_to_i(nPtj, -1);
+  for (int i = 0; i < threadNum; ++i) {
+    int start = i * perCalSize;
+    int end = (i + 1) * perCalSize > nPtj ? nPtj : (i + 1) * perCalSize;
+    threads.emplace_back(std::thread([&](int start, int end) {
+      for (int j = start; j < end; ++j) {
+        searchKDTree(&feature_tree_i, features_[fj][j], corres_K, dis, 1);
+        j_to_i[j] = corres_K[0];
+      }
+    },start,end));
+  }
+  for (std::thread& t : threads) {
+    t.join();
   }
 
-  for (int i = 0; i < nPti; i++) {
-    if (i_to_j[i] != -1)
+  // 多线程计算corres_ij
+  std::vector<int> i_to_j(nPti, -1);
+  for (int j = 0; j < j_to_i.size(); ++j) {
+    corres_ji.push_back(std::pair<int, int>(j_to_i[j], j));
+    i_to_j[j_to_i[j]] = 1;
+  }
+  perCalSize = nPti / threadNum + 1;
+  std::vector<std::thread> threads1;
+  for (int i = 0; i < threadNum; ++i) {
+    int start = i * perCalSize;
+    int end = (i + 1) * perCalSize > nPti ? nPti : (i + 1) * perCalSize;
+    threads1.emplace_back(std::thread([&](int start, int end) {
+      for (int j = start; j < end; ++j) {
+        searchKDTree(&feature_tree_j, features_[fi][j], corres_K, dis, 1);
+        i_to_j[j] = corres_K[0];
+      }
+    },start,end));
+  }
+  for (std::thread& t : threads1) {
+    t.join();
+  }
+  for (int i = 0; i < i_to_j.size(); ++i) {
+    if (i_to_j[i] != -1) {
       corres_ij.push_back(std::pair<int, int>(i, i_to_j[i]));
+    }
   }
 
   int ncorres_ij = corres_ij.size();
